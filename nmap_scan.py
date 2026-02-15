@@ -60,11 +60,11 @@ def run_scan():
                     mac = mac_elem.get('addr')
                     vendor = mac_elem.get('vendor')
                 else:
-                    # MAC fehlt → IP als Platzhalter verwenden
+                    # MAC fehlt → IP als Platzhalter
                     mac = ip
                     vendor = "unknown"
 
-                # --- Gerät upserten ---
+                # --- Gerät upserten / MAC ersetzen falls vorher nur IP-Platzhalter ---
                 cur.execute("""
                     INSERT INTO devices (mac, hostname, vendor, last_seen)
                     VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -77,6 +77,15 @@ def run_scan():
                     RETURNING id;
                 """, (mac, hostname, vendor))
                 device_id = cur.fetchone()[0]
+
+                # Falls Gerät zuvor nur IP-Platzhalter war, ersetzen wir die MAC
+                if mac_elem is not None:
+                    cur.execute("""
+                        UPDATE devices
+                        SET mac = %s
+                        WHERE mac = %s AND mac != %s;
+                    """, (mac, ip, mac))
+
                 scanned_device_ids.append(device_id)
 
                 # --- IP zu Gerät ---
