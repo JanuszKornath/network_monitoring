@@ -17,7 +17,6 @@ TARGET_NETS = [
     "192.168.179.0/24"
 ]
 
-# Zeitfenster, nach dem ein Gerät als "down" gilt, wenn es nicht gescannt wurde
 OFFLINE_THRESHOLD_MINUTES = 5
 
 def run_scan():
@@ -47,15 +46,6 @@ def run_scan():
                     continue
 
                 ip = ipv4_elem.get('addr')
-
-                mac_elem = host.find("address[@addrtype='mac']")
-                if mac_elem is None:
-                    # Ohne MAC können wir keine eindeutige Identität zuordnen
-                    continue
-
-                mac = mac_elem.get('addr')
-                vendor = mac_elem.get('vendor')
-
                 state = host.find('status').get('state')  # 'up'
 
                 hostname = ""
@@ -65,7 +55,16 @@ def run_scan():
                     if name_tag is not None:
                         hostname = name_tag.get('name')
 
-                # --- 1️⃣ Gerät upserten ---
+                mac_elem = host.find("address[@addrtype='mac']")
+                if mac_elem is not None:
+                    mac = mac_elem.get('addr')
+                    vendor = mac_elem.get('vendor')
+                else:
+                    # MAC fehlt → IP als Platzhalter verwenden
+                    mac = ip
+                    vendor = "unknown"
+
+                # --- Gerät upserten ---
                 cur.execute("""
                     INSERT INTO devices (mac, hostname, vendor, last_seen)
                     VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -80,7 +79,7 @@ def run_scan():
                 device_id = cur.fetchone()[0]
                 scanned_device_ids.append(device_id)
 
-                # --- 2️⃣ IP dem Gerät zuordnen ---
+                # --- IP zu Gerät ---
                 cur.execute("""
                     INSERT INTO ip_addresses (device_id, ip, state, last_seen)
                     VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
@@ -92,7 +91,7 @@ def run_scan():
             conn.commit()
             print(f"Netz {net} fertig. {len(scanned_device_ids)} Geräte gefunden.")
 
-            # --- 3️⃣ Geräte auf 'down' setzen, die im Scan nicht gefunden wurden ---
+            # --- Offline-Geräte auf 'down' setzen ---
             offline_cutoff = datetime.now() - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
             cur.execute("""
                 UPDATE ip_addresses
@@ -101,7 +100,7 @@ def run_scan():
             """, (offline_cutoff,))
             conn.commit()
 
-        # --- Snapshot für Verlauf ---
+        # --- Snapshot ---
         cur.execute("""
             INSERT INTO nmap_history (online_count)
             SELECT COUNT(DISTINCT device_id)
