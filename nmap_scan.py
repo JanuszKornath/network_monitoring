@@ -2,8 +2,8 @@ import subprocess
 import psycopg2
 import xml.etree.ElementTree as ET
 import sys
+from datetime import datetime, timedelta
 
-# --- KONFIGURATION ---
 DB_PARAMS = {
     "host": "localhost",
     "database": "nmapdb",
@@ -14,8 +14,11 @@ DB_PARAMS = {
 TARGET_NETS = [
     "192.168.178.0/24",
     "10.8.0.0/24",
-    "192.168.179.1/24"
+    "192.168.179.0/24"
 ]
+
+# Zeitfenster, nach dem ein Gerät als "down" gilt, wenn es nicht gescannt wurde
+OFFLINE_THRESHOLD_MINUTES = 5
 
 def run_scan():
     try:
@@ -25,22 +28,35 @@ def run_scan():
         for net in TARGET_NETS:
             print(f"Scanne Netzwerk: {net}...")
 
-            # 1. Alle im Subnetz auf 'down' setzen (Casting auf INET)
-            cur.execute("UPDATE nmap_results SET state = 'down' WHERE ip << inet %s", (net,))
+            cmd = [
+                "nmap", "-sn",
+                "-PS22,80,443,445,3389",
+                "--script", "nbstat",
+                "--min-parallelism", "10",
+                "-oX", "-", net
+            ]
 
-            # 2. Nmap Scan ausführen
-            cmd = ["nmap", "-sn", "-PS22,80,443,445,3389", "--script", "nbstat", "--min-parallelism", "10", "-oX", "-", net]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-
             root = ET.fromstring(result.stdout)
-            found_count = 0
+
+            scanned_device_ids = []
 
             for host in root.findall('host'):
-                addr_elem = host.find("address[@addrtype='ipv4']")
-                if addr_elem is None: continue
+                ipv4_elem = host.find("address[@addrtype='ipv4']")
+                if ipv4_elem is None:
+                    continue
 
-                ip = addr_elem.get('addr')
-                state = host.find('status').get('state') # Das ist 'up'
+                ip = ipv4_elem.get('addr')
+
+                mac_elem = host.find("address[@addrtype='mac']")
+                if mac_elem is None:
+                    # Ohne MAC können wir keine eindeutige Identität zuordnen
+                    continue
+
+                mac = mac_elem.get('addr')
+                vendor = mac_elem.get('vendor')
+
+                state = host.find('status').get('state')  # 'up'
 
                 hostname = ""
                 hostnames_elem = host.find('hostnames')
@@ -49,34 +65,58 @@ def run_scan():
                     if name_tag is not None:
                         hostname = name_tag.get('name')
 
-                # 3. Den Status für gefundene Geräte wieder auf 'up' setzen (Upsert)
+                # --- 1️⃣ Gerät upserten ---
                 cur.execute("""
-                    INSERT INTO nmap_results (ip, hostname, state, first_seen, last_scan)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    ON CONFLICT (ip) DO UPDATE
-                    SET hostname = CASE WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname ELSE nmap_results.hostname END,
-                        state = EXCLUDED.state,
-                        last_scan = EXCLUDED.last_scan;
-                """, (ip, hostname, state))
+                    INSERT INTO devices (mac, hostname, vendor, last_seen)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (mac) DO UPDATE
+                    SET hostname = CASE
+                        WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname
+                        ELSE devices.hostname
+                    END,
+                        last_seen = CURRENT_TIMESTAMP
+                    RETURNING id;
+                """, (mac, hostname, vendor))
+                device_id = cur.fetchone()[0]
+                scanned_device_ids.append(device_id)
 
-                found_count += 1
+                # --- 2️⃣ IP dem Gerät zuordnen ---
+                cur.execute("""
+                    INSERT INTO ip_addresses (device_id, ip, state, last_seen)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (device_id, ip) DO UPDATE
+                    SET state = EXCLUDED.state,
+                        last_seen = CURRENT_TIMESTAMP;
+                """, (device_id, ip, state))
 
             conn.commit()
-            print(f"Netz {net} fertig: {found_count} Hosts online gefunden.")
+            print(f"Netz {net} fertig. {len(scanned_device_ids)} Geräte gefunden.")
 
-# Snapshot für den Verlauf speichern
+            # --- 3️⃣ Geräte auf 'down' setzen, die im Scan nicht gefunden wurden ---
+            offline_cutoff = datetime.now() - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
+            cur.execute("""
+                UPDATE ip_addresses
+                SET state = 'down'
+                WHERE last_seen < %s;
+            """, (offline_cutoff,))
+            conn.commit()
+
+        # --- Snapshot für Verlauf ---
         cur.execute("""
             INSERT INTO nmap_history (online_count)
-            SELECT COUNT(*) FROM nmap_results WHERE state = 'up';
+            SELECT COUNT(DISTINCT device_id)
+            FROM ip_addresses
+            WHERE state = 'up';
         """)
         conn.commit()
 
         cur.close()
         conn.close()
-        print("Bereinigter Scan erfolgreich beendet.")
+        print("Scan erfolgreich beendet.")
 
     except Exception as e:
         print(f"Fehler: {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     run_scan()
