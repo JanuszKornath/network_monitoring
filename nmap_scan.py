@@ -2,7 +2,7 @@ import subprocess
 import psycopg2
 import xml.etree.ElementTree as ET
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DB_PARAMS = {
     "host": "localhost",
@@ -25,9 +25,9 @@ def run_scan():
         conn = psycopg2.connect(**DB_PARAMS)
         cur = conn.cursor()
         
-        # Startzeitpunkt fixieren für diesen Durchlauf
-        scan_start_time = datetime.now()
-        print(f"Scan gestartet um: {scan_start_time}")
+        # Startzeitpunkt fixieren für diesen Durchlauf (jetzt mit Zeitzone UTC)
+        scan_start_time = datetime.now(timezone.utc)
+        print(f"Scan gestartet um (UTC): {scan_start_time}")
 
         for net in TARGET_NETS:
             print(f"Scanne Netzwerk: {net}...")
@@ -73,7 +73,6 @@ def run_scan():
                     vendor = "L3-Hop/Internal"
 
                 # 1. Gerät (MAC) upserten
-                # Bei Clustern/keepalived bleibt die MAC die Konstante für die Hardware
                 cur.execute("""
                     INSERT INTO devices (mac, hostname, vendor, last_seen)
                     VALUES (%s, %s, %s, %s)
@@ -88,9 +87,7 @@ def run_scan():
                 
                 device_id = cur.fetchone()[0]
 
-                # 2. IP-Adresse zuordnen (device_id + ip ist der Key)
-                # Hier wird nun auch für die Keepalived-IP (.10) der korrekte Status gesetzt,
-                # egal welche MAC (.246 oder .247) sie gerade "besitzt".
+                # 2. IP-Adresse zuordnen
                 cur.execute("""
                     INSERT INTO ip_addresses (device_id, ip, state, last_seen)
                     VALUES (%s, %s, 'up', %s)
@@ -103,8 +100,7 @@ def run_scan():
             print(f"Netz {net} verarbeitet.")
 
         # --- Offline-Bereinigung ---
-        # Alle IPs, die in diesem Scan-Zyklus nicht aktualisiert wurden, sind 'down'
-        offline_cutoff = scan_start_time - timedelta(seconds=10) # Puffer
+        offline_cutoff = scan_start_time - timedelta(seconds=10)
         
         cur.execute("""
             UPDATE ip_addresses
