@@ -17,12 +17,17 @@ TARGET_NETS = [
     "192.168.179.0/24"
 ]
 
-OFFLINE_THRESHOLD_MINUTES = 5
+# Zeitfenster, nach dem eine IP als 'down' markiert wird
+OFFLINE_THRESHOLD_MINUTES = 15
 
 def run_scan():
     try:
         conn = psycopg2.connect(**DB_PARAMS)
         cur = conn.cursor()
+        
+        # Startzeitpunkt fixieren für diesen Durchlauf
+        scan_start_time = datetime.now()
+        print(f"Scan gestartet um: {scan_start_time}")
 
         for net in TARGET_NETS:
             print(f"Scanne Netzwerk: {net}...")
@@ -38,16 +43,18 @@ def run_scan():
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             root = ET.fromstring(result.stdout)
 
-            scanned_device_ids = []
-
             for host in root.findall('host'):
+                status_elem = host.find('status')
+                if status_elem is None or status_elem.get('state') != 'up':
+                    continue
+                
                 ipv4_elem = host.find("address[@addrtype='ipv4']")
                 if ipv4_elem is None:
                     continue
 
                 ip = ipv4_elem.get('addr')
-                state = host.find('status').get('state')  # 'up'
 
+                # Hostname finden
                 hostname = ""
                 hostnames_elem = host.find('hostnames')
                 if hostnames_elem is not None:
@@ -55,61 +62,62 @@ def run_scan():
                     if name_tag is not None:
                         hostname = name_tag.get('name')
 
+                # MAC & Vendor
                 mac_elem = host.find("address[@addrtype='mac']")
                 if mac_elem is not None:
                     mac = mac_elem.get('addr')
-                    vendor = mac_elem.get('vendor')
+                    vendor = mac_elem.get('vendor') or "unknown"
                 else:
-                    # MAC fehlt → IP als Platzhalter
-                    mac = ip
-                    vendor = "unknown"
+                    # Spezialfall Localhost oder L3-Hops
+                    mac = f"IP-{ip}"
+                    vendor = "L3-Hop/Internal"
 
-                # --- Gerät upserten / MAC ersetzen falls vorher nur IP-Platzhalter ---
+                # 1. Gerät (MAC) upserten
+                # Bei Clustern/keepalived bleibt die MAC die Konstante für die Hardware
                 cur.execute("""
                     INSERT INTO devices (mac, hostname, vendor, last_seen)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (mac) DO UPDATE
-                    SET hostname = CASE
-                        WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname
-                        ELSE devices.hostname
+                    SET hostname = CASE 
+                        WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname 
+                        ELSE devices.hostname 
                     END,
-                        last_seen = CURRENT_TIMESTAMP
+                    last_seen = EXCLUDED.last_seen
                     RETURNING id;
-                """, (mac, hostname, vendor))
+                """, (mac, hostname, vendor, scan_start_time))
+                
                 device_id = cur.fetchone()[0]
 
-                # Falls Gerät zuvor nur IP-Platzhalter war, ersetzen wir die MAC
-                if mac_elem is not None:
-                    cur.execute("""
-                        UPDATE devices
-                        SET mac = %s
-                        WHERE mac = %s AND mac != %s;
-                    """, (mac, ip, mac))
-
-                scanned_device_ids.append(device_id)
-
-                # --- IP zu Gerät ---
+                # 2. IP-Adresse zuordnen (device_id + ip ist der Key)
+                # Hier wird nun auch für die Keepalived-IP (.10) der korrekte Status gesetzt,
+                # egal welche MAC (.246 oder .247) sie gerade "besitzt".
                 cur.execute("""
                     INSERT INTO ip_addresses (device_id, ip, state, last_seen)
-                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, 'up', %s)
                     ON CONFLICT (device_id, ip) DO UPDATE
-                    SET state = EXCLUDED.state,
-                        last_seen = CURRENT_TIMESTAMP;
-                """, (device_id, ip, state))
+                    SET state = 'up',
+                        last_seen = EXCLUDED.last_seen;
+                """, (device_id, ip, scan_start_time))
 
             conn.commit()
-            print(f"Netz {net} fertig. {len(scanned_device_ids)} Geräte gefunden.")
+            print(f"Netz {net} verarbeitet.")
 
-            # --- Offline-Geräte auf 'down' setzen ---
-            offline_cutoff = datetime.now() - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
-            cur.execute("""
-                UPDATE ip_addresses
-                SET state = 'down'
-                WHERE last_seen < %s;
-            """, (offline_cutoff,))
-            conn.commit()
+        # --- Offline-Bereinigung ---
+        # Alle IPs, die in diesem Scan-Zyklus nicht aktualisiert wurden, sind 'down'
+        offline_cutoff = scan_start_time - timedelta(seconds=10) # Puffer
+        
+        cur.execute("""
+            UPDATE ip_addresses
+            SET state = 'down'
+            WHERE last_seen < %s AND state = 'up';
+        """, (offline_cutoff,))
+        
+        down_count = cur.rowcount
+        conn.commit()
+        if down_count > 0:
+            print(f"{down_count} IPs wurden als 'down' markiert.")
 
-        # --- Snapshot ---
+        # Historie-Snapshot
         cur.execute("""
             INSERT INTO nmap_history (online_count)
             SELECT COUNT(DISTINCT device_id)
@@ -123,8 +131,7 @@ def run_scan():
         print("Scan erfolgreich beendet.")
 
     except Exception as e:
-        print(f"Fehler: {e}", file=sys.stderr)
-
+        print(f"Fehler im Scan-Skript: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     run_scan()
