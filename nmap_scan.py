@@ -1,3 +1,4 @@
+import os
 import subprocess
 import psycopg2
 import xml.etree.ElementTree as ET
@@ -5,10 +6,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 DB_PARAMS = {
-    "host": "localhost",
-    "database": "nmapdb",
-    "user": "nmapuser",
-    "password": "nmap123"
+    "host": os.environ.get("NMAPDB_HOST", "localhost"),
+    "database": os.environ.get("NMAPDB_NAME", "nmapdb"),
+    "user": os.environ.get("NMAPDB_USER", "nmapuser"),
+    # Kein Default: muss per Umgebungsvariable gesetzt sein (oder via ~/.pgpass)
+    "password": os.environ.get("NMAPDB_PASSWORD")
 }
 
 TARGET_NETS = [
@@ -100,7 +102,7 @@ def run_scan():
             print(f"Netz {net} verarbeitet.")
 
         # --- Offline-Bereinigung ---
-        offline_cutoff = scan_start_time - timedelta(seconds=10)
+        offline_cutoff = scan_start_time - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
         
         cur.execute("""
             UPDATE ip_addresses
@@ -128,6 +130,7 @@ def run_scan():
 
     except Exception as e:
         print(f"Fehler im Scan-Skript: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     run_scan()
