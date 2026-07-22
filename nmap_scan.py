@@ -1,3 +1,4 @@
+import os
 import subprocess
 import psycopg2
 import xml.etree.ElementTree as ET
@@ -5,10 +6,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 DB_PARAMS = {
-    "host": "localhost",
-    "database": "nmapdb",
-    "user": "nmapuser",
-    "password": "nmap123"
+    "host": os.environ.get("NMAPDB_HOST", "localhost"),
+    "database": os.environ.get("NMAPDB_NAME", "nmapdb"),
+    "user": os.environ.get("NMAPDB_USER", "nmapuser"),
+    # Kein Default: muss per Umgebungsvariable gesetzt sein (oder via ~/.pgpass)
+    "password": os.environ.get("NMAPDB_PASSWORD")
 }
 
 TARGET_NETS = [
@@ -20,11 +22,29 @@ TARGET_NETS = [
 # Zeitfenster, nach dem eine IP als 'down' markiert wird
 OFFLINE_THRESHOLD_MINUTES = 15
 
+def scan_net(net):
+    """Scannt ein einzelnes Netz und liefert das geparste XML-Root-Element."""
+    cmd = [
+        "nmap", "-sn",
+        "-PS22,80,443,445,3389",
+        "--script", "nbstat",
+        "--min-parallelism", "10",
+        "-oX", "-", net
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return ET.fromstring(result.stdout)
+
 def run_scan():
     try:
         conn = psycopg2.connect(**DB_PARAMS)
+    except Exception as e:
+        print(f"Keine Datenbankverbindung: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    failed_nets = []
+    try:
         cur = conn.cursor()
-        
+
         # Startzeitpunkt fixieren für diesen Durchlauf (jetzt mit Zeitzone UTC)
         scan_start_time = datetime.now(timezone.utc)
         print(f"Scan gestartet um (UTC): {scan_start_time}")
@@ -32,16 +52,16 @@ def run_scan():
         for net in TARGET_NETS:
             print(f"Scanne Netzwerk: {net}...")
 
-            cmd = [
-                "nmap", "-sn",
-                "-PS22,80,443,445,3389",
-                "--script", "nbstat",
-                "--min-parallelism", "10",
-                "-oX", "-", net
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            root = ET.fromstring(result.stdout)
+            try:
+                root = scan_net(net)
+            except subprocess.CalledProcessError as e:
+                print(f"nmap-Scan für {net} fehlgeschlagen: {e.stderr}", file=sys.stderr)
+                failed_nets.append(net)
+                continue
+            except ET.ParseError as e:
+                print(f"Ungültige nmap-Ausgabe für {net}: {e}", file=sys.stderr)
+                failed_nets.append(net)
+                continue
 
             for host in root.findall('host'):
                 status_elem = host.find('status')
@@ -60,7 +80,7 @@ def run_scan():
                 if hostnames_elem is not None:
                     name_tag = hostnames_elem.find('hostname')
                     if name_tag is not None:
-                        hostname = name_tag.get('name')
+                        hostname = name_tag.get('name') or ""
 
                 # MAC & Vendor
                 mac_elem = host.find("address[@addrtype='mac']")
@@ -100,7 +120,7 @@ def run_scan():
             print(f"Netz {net} verarbeitet.")
 
         # --- Offline-Bereinigung ---
-        offline_cutoff = scan_start_time - timedelta(seconds=10)
+        offline_cutoff = scan_start_time - timedelta(minutes=OFFLINE_THRESHOLD_MINUTES)
         
         cur.execute("""
             UPDATE ip_addresses
@@ -122,12 +142,16 @@ def run_scan():
         """)
         conn.commit()
 
-        cur.close()
-        conn.close()
-        print("Scan erfolgreich beendet.")
-
     except Exception as e:
         print(f"Fehler im Scan-Skript: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    if failed_nets:
+        print(f"Scan beendet, aber fehlgeschlagene Netze: {', '.join(failed_nets)}", file=sys.stderr)
+        sys.exit(1)
+    print("Scan erfolgreich beendet.")
 
 if __name__ == "__main__":
     run_scan()
