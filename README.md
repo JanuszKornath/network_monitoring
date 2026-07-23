@@ -78,6 +78,26 @@ ist; ohne die Variable läuft das Skript als reines nmap-Skript.
 | `FRITZ_USER`     | `nmapscan`      | FritzBox-Benutzer für TR-064        |
 | `FRITZ_PASSWORD` | *(keiner)*      | Passwort; aktiviert die Abfrage     |
 
+Die Variablen werden wie bei der Datenbank als Umgebungsvariablen
+mitgegeben, z. B. beim manuellen Aufruf:
+
+```bash
+export FRITZ_PASSWORD='fritzbox-passwort'
+# Nur nötig, wenn die Defaults nicht passen:
+export FRITZ_ADDRESS='192.168.178.1'
+export FRITZ_USER='nmapscan'
+python3 nmap_scan.py
+```
+
+Bei Cron-Betrieb die Variablen in der Crontab bzw. systemd-Unit setzen,
+zusammen mit den `NMAPDB_*`-Variablen:
+
+```cron
+NMAPDB_PASSWORD=geheimes-passwort
+FRITZ_PASSWORD=fritzbox-passwort
+*/5 * * * * /usr/bin/python3 /pfad/zu/nmap_scan.py
+```
+
 Übernommen wird jedes aktive Gerät, dessen IP in eines der `TARGET_NETS`
 fällt. Doppelte Treffer mit nmap sind unkritisch: Die Ergebnisse werden
 über die MAC-Adresse dedupliziert. Für Geräte, die nur per TR-064 gesehen
