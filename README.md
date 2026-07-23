@@ -2,15 +2,19 @@
 
 Ein Python-Skript, das per `nmap` konfigurierte Netzwerke scannt und die
 gefundenen Geräte (MAC, Hostname, Vendor, IP-Adressen) in einer
-PostgreSQL-Datenbank pflegt. IPs, die länger als 15 Minuten nicht mehr
-gesehen wurden, werden als `down` markiert; zusätzlich wird pro Lauf ein
-Historie-Snapshot der Online-Geräte geschrieben.
+PostgreSQL-Datenbank pflegt. Optional wird zusätzlich die Host-Liste einer
+FritzBox per TR-064 abgefragt, um auch Geräte zu erfassen, die nmap nicht
+erreichen kann (z. B. im firewall-isolierten Gastnetz). IPs, die länger als
+15 Minuten nicht mehr gesehen wurden, werden als `down` markiert; zusätzlich
+wird pro Lauf ein Historie-Snapshot der Online-Geräte geschrieben.
 
 ## Voraussetzungen
 
 - Python 3 mit `psycopg2` (`pip install psycopg2-binary`)
 - `nmap` (für MAC-Erkennung im lokalen Netz mit Root-Rechten ausführen)
 - PostgreSQL mit den Tabellen `devices`, `ip_addresses` und `nmap_history`
+- Optional: `fritzconnection` (`pip install fritzconnection`) — nur nötig,
+  wenn die FritzBox-Abfrage per TR-064 genutzt wird
 
 ## Konfiguration
 
@@ -56,7 +60,49 @@ NMAPDB_PASSWORD=geheimes-passwort
 ```
 
 Das Skript beendet sich bei Fehlern (auch bei einzelnen fehlgeschlagenen
-Netzen) mit Exit-Code 1, sodass Cron/Monitoring Fehlschläge erkennen kann.
+Netzen oder einer fehlgeschlagenen FritzBox-Abfrage) mit Exit-Code 1,
+sodass Cron/Monitoring Fehlschläge erkennen kann.
+
+## Optionale Zusatzquelle: FritzBox (TR-064)
+
+Zusätzlich zu den nmap-Scans kann das Skript die Host-Liste einer FritzBox
+per TR-064 abfragen. Das ist nützlich für Netze, die per Firewall isoliert
+sind (z. B. das Gastnetz) und in denen nmap deshalb nichts sieht.
+
+Die Abfrage aktiviert sich automatisch, sobald `FRITZ_PASSWORD` gesetzt
+ist; ohne die Variable läuft das Skript als reines nmap-Skript.
+
+| Variable         | Default         | Beschreibung                        |
+|------------------|-----------------|-------------------------------------|
+| `FRITZ_ADDRESS`  | `192.168.178.1` | Adresse der FritzBox                |
+| `FRITZ_USER`     | `nmapscan`      | FritzBox-Benutzer für TR-064        |
+| `FRITZ_PASSWORD` | *(keiner)*      | Passwort; aktiviert die Abfrage     |
+
+Die Variablen werden wie bei der Datenbank als Umgebungsvariablen
+mitgegeben, z. B. beim manuellen Aufruf:
+
+```bash
+export FRITZ_PASSWORD='fritzbox-passwort'
+# Nur nötig, wenn die Defaults nicht passen:
+export FRITZ_ADDRESS='192.168.178.1'
+export FRITZ_USER='nmapscan'
+python3 nmap_scan.py
+```
+
+Bei Cron-Betrieb die Variablen in der Crontab bzw. systemd-Unit setzen,
+zusammen mit den `NMAPDB_*`-Variablen:
+
+```cron
+NMAPDB_PASSWORD=geheimes-passwort
+FRITZ_PASSWORD=fritzbox-passwort
+*/5 * * * * /usr/bin/python3 /pfad/zu/nmap_scan.py
+```
+
+Übernommen wird jedes aktive Gerät, dessen IP in eines der `TARGET_NETS`
+fällt. Doppelte Treffer mit nmap sind unkritisch: Die Ergebnisse werden
+über die MAC-Adresse dedupliziert. Für Geräte, die nur per TR-064 gesehen
+wurden, wird der Vendor als `unknown (TR-064)` eingetragen und später
+durch echte nmap-Daten überschrieben, sobald verfügbar.
 
 ## Gescannte Netze und Offline-Schwelle
 
