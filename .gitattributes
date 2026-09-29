@@ -1,0 +1,5 @@
+# Alle Textdateien im Repository mit LF speichern und auschecken.
+# Ueberstimmt ein global gesetztes core.autocrlf=true, damit Windows- und
+# Linux-Clients dieselbe Arbeitskopie sehen und Skripte auch nach einem
+# Umweg ueber Windows eine gueltige Shebang-Zeile behalten.
+* text=auto eol=lf
