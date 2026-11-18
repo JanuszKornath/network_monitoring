@@ -316,6 +316,25 @@ def close_stale_ports(cur, device_ids, run_start):
     return cur.rowcount
 
 
+def mark_run_aborted(conn, run_id):
+    """Setzt finished_at fuer einen abgebrochenen Lauf (ok bleibt FALSE).
+    So bleibt finished_at IS NULL laufenden Scans vorbehalten."""
+    try:
+        conn.rollback()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE deep_scan_runs
+            SET finished_at = %s
+            WHERE id = %s AND finished_at IS NULL;
+            """,
+            (datetime.now(timezone.utc), run_id),
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"Abbruch konnte nicht protokolliert werden: {e}", file=sys.stderr)
+
+
 def run_deep_scan():
     try:
         conn = psycopg2.connect(**DB_PARAMS)
@@ -325,6 +344,7 @@ def run_deep_scan():
 
     run_start = datetime.now(timezone.utc)
     run_id = None
+    completed = False
 
     try:
         cur = conn.cursor()
@@ -402,6 +422,7 @@ def run_deep_scan():
             (finished, len(scanned_devices), port_count, run_id),
         )
         conn.commit()
+        completed = True
 
         print(f"{len(scanned_devices)} Hosts, {port_count} offene Ports erfasst.")
         print(f"OS: {fingerprint_count} per Fingerprint, "
@@ -415,6 +436,9 @@ def run_deep_scan():
         print(f"Fehler im Deep-Scan-Skript: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
+        # Greift auch bei sys.exit() (SystemExit) aus dem try-Block.
+        if run_id is not None and not completed:
+            mark_run_aborted(conn, run_id)
         conn.close()
 
 

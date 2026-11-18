@@ -32,8 +32,12 @@ psql nmapdb -c "CREATE USER nmapuser WITH PASSWORD 'geheimes-passwort';"
 psql nmapdb -f sql/schema.sql
 ```
 
-`sql/schema.sql` ist idempotent und lässt sich auch auf einer bestehenden
-Installation einspielen, um fehlende Tabellen und Spalten zu ergänzen.
+`sql/schema.sql` lässt sich gefahrlos mehrfach einspielen: fehlende
+Tabellen und Indizes werden angelegt, bestehende bleiben unberührt. Fehlende
+Spalten in bestehenden Tabellen ergänzt `CREATE TABLE IF NOT EXISTS` dagegen
+nicht; das Schema enthält dafür nur für `os_matches.source` und
+`os_matches.evidence` ein `ALTER TABLE … ADD COLUMN IF NOT EXISTS`. Kommen
+später weitere Spalten hinzu, brauchen sie eine eigene solche Anweisung.
 
 Die Datenbank muss auf UTC stehen. Beide Skripte schreiben zeitzonenbewusste
 UTC-Werte in `timestamp`-Spalten ohne Zeitzone; PostgreSQL castet die anhand
@@ -106,8 +110,12 @@ export FRITZ_USER='nmapscan'
 python3 nmap_scan.py
 ```
 
-Diese Geräte bleiben im Deep Scan außen vor: nmap kommt dort nicht hin, es
-gibt für sie also weder Ports noch OS-Erkennung.
+Die Herkunft eines Geräts (nmap oder TR-064) wird nicht gespeichert. Der
+Deep Scan überspringt deshalb nur, was in `EXCLUDE_NETS` oder
+`EXCLUDE_HOSTS` steht (siehe [Deep Scan](#deep-scan)); für das Gastnetz
+`192.168.179.0/24` ist das voreingestellt. Ein Gerät, das nur per TR-064
+sichtbar ist, aber in einem gescannten Netz liegt, wird trotzdem tief
+gescannt; liefert nmap dafür nichts, bleibt es ohne Ports und OS-Angabe.
 
 ## Gescannte Netze und Offline-Schwelle
 
@@ -171,11 +179,31 @@ damit sagt, wann die Angabe zuletzt wirklich belegt war.
 **Jeder Lauf** wird in `deep_scan_runs` protokolliert. Ein ausgefallener
 nächtlicher Job fällt sonst erst auf, wenn die Daten alt sind.
 
+## Installation
+
+Cron und systemd erwarten die Skripte unter `/usr/local/bin` und die
+Zugangsdaten in `/etc/nmap_scan.env`:
+
+```bash
+install -m 755 nmap_scan.py nmap_deep_scan.py /usr/local/bin/
+install -m 600 -o root -g root /dev/null /etc/nmap_scan.env
+```
+
+Danach `/etc/nmap_scan.env` mit den Variablen aus
+[Konfiguration](#konfiguration) und [FritzBox](#fritzbox-als-zusatzquelle-tr-064)
+füllen, z. B.:
+
+```
+NMAPDB_PASSWORD='geheimes-passwort'
+FRITZ_PASSWORD='fritzbox-passwort'
+```
+
 ## Cron
 
-Beide Skripte brauchen Root — `-sS` und `-O` sind Raw-Socket-Operationen, und
-ohne sie fällt `nmap` still auf einen TCP-Connect-Scan ohne OS-Erkennung
-zurück.
+Beide Skripte brauchen Root. `nmap_scan.py` benötigt es für die
+ARP/MAC-Erkennung im lokalen Netz und die SYN-Pings (`-PS`), der Deep Scan
+für `-sS` und `-O`. Das sind Raw-Socket-Operationen; ohne Root fällt `nmap`
+still auf einen TCP-Connect-Scan ohne MAC- und OS-Erkennung zurück.
 
 ```
 MAILTO=""
@@ -214,6 +242,15 @@ ExecStart=/usr/bin/python3 /usr/local/bin/nmap_scan.py
 
 ## Fehlerverhalten
 
-Beide Skripte beenden sich bei Fehlern mit Exit-Code 1 — `nmap_scan.py` auch
-dann, wenn nur einzelne Netze fehlgeschlagen sind —, sodass Cron und
-Monitoring Fehlschläge erkennen können.
+Beide Skripte beenden sich bei Fehlern mit Exit-Code 1, sodass Cron und
+Monitoring Fehlschläge erkennen können. Das gilt auch, wenn
+
+* bei `nmap_scan.py` nur einzelne Netze oder nur die FritzBox-Abfrage
+  (TR-064) fehlgeschlagen sind,
+* `nmap_deep_scan.py` keine Ziele in der Datenbank findet (läuft der
+  Discovery-Scan?).
+
+Ein abgebrochener Deep Scan bleibt in `deep_scan_runs` mit `ok = FALSE`
+stehen, bekommt aber ein `finished_at`. Ein Eintrag mit `finished_at IS
+NULL` ist damit ein Lauf, der gerade läuft (oder dessen Prozess hart
+beendet wurde).
