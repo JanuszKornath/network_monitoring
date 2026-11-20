@@ -1,8 +1,11 @@
 -- network_monitoring: vollstaendiges Datenbankschema
 --
--- Idempotent: laesst sich auf einer leeren Datenbank genauso einspielen wie
--- auf einer bestehenden Installation. Bestehende Tabellen bleiben unberuehrt,
--- fehlende Spalten werden ergaenzt.
+-- Laesst sich auf einer leeren Datenbank genauso einspielen wie auf einer
+-- bestehenden Installation: fehlende Tabellen und Indizes werden angelegt,
+-- bestehende bleiben unberuehrt. CREATE TABLE IF NOT EXISTS ergaenzt aber
+-- keine Spalten in bestehenden Tabellen -- nachtraeglich hinzugekommene
+-- Spalten brauchen ein eigenes ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+-- (siehe os_matches.source und os_matches.evidence).
 --
 --   createdb nmapdb
 --   psql nmapdb -f sql/schema.sql
