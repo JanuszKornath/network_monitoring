@@ -38,6 +38,10 @@ def scan_net(net):
     """Scannt ein einzelnes Netz und liefert das geparste XML-Root-Element."""
     cmd = [
         "nmap", "-sn",
+        # -PS ersetzt die Standard-Probes von nmap komplett, also auch das
+        # ICMP-Echo. Ohne -PE fehlen deshalb geroutete Clients ohne offene
+        # Ports, die nur auf Ping antworten (z. B. Handys im VPN 10.8.0.0/24).
+        "-PE",
         "-PS22,80,443,445,3389",
         "--script", "nbstat",
         "--min-parallelism", "10",

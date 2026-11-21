@@ -201,7 +201,7 @@ FRITZ_PASSWORD='fritzbox-passwort'
 ## Cron
 
 Beide Skripte brauchen Root. `nmap_scan.py` benötigt es für die
-ARP/MAC-Erkennung im lokalen Netz und die SYN-Pings (`-PS`), der Deep Scan
+ARP/MAC-Erkennung im lokalen Netz, die ICMP-Echo-Pings (`-PE`) und die SYN-Pings (`-PS`), der Deep Scan
 für `-sS` und `-O`. Das sind Raw-Socket-Operationen; ohne Root fällt `nmap`
 still auf einen TCP-Connect-Scan ohne MAC- und OS-Erkennung zurück.
 
